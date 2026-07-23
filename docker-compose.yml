@@ -1,0 +1,151 @@
+services:
+  mongodb:
+    image: mongo:7
+    container_name: iwasist-mongodb
+    restart: unless-stopped
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongodb_data:/data/db
+    networks:
+      - iwasist-network
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  temporal-postgresql:
+    image: postgres:14
+    container_name: iwasist-temporal-postgresql
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: temporal
+      POSTGRES_PASSWORD: temporal
+      POSTGRES_DB: temporal
+    volumes:
+      - temporal_postgres_data:/var/lib/postgresql/data
+    networks:
+      - iwasist-network
+
+  temporal:
+    image: temporalio/auto-setup:1.27.2
+    container_name: iwasist-temporal
+    restart: unless-stopped
+    depends_on:
+      - temporal-postgresql
+    environment:
+      - DB=postgres12
+      - DB_PORT=5432
+      - POSTGRES_USER=temporal
+      - POSTGRES_PWD=temporal
+      - POSTGRES_SEEDS=temporal-postgresql
+    ports:
+      - "7233:7233"
+    networks:
+      - iwasist-network
+
+  temporal-ui:
+    image: temporalio/ui:2.37.2
+    container_name: iwasist-temporal-ui
+    restart: unless-stopped
+    depends_on:
+      - temporal
+    environment:
+      - TEMPORAL_ADDRESS=temporal:7233
+      - TEMPORAL_CORS_ORIGINS=http://localhost:8080
+    ports:
+      - "8080:8080"
+    networks:
+      - iwasist-network
+
+  whisper:
+    build:
+      context: ./whisper
+      dockerfile: Dockerfile
+    container_name: iwasist-whisper
+    restart: unless-stopped
+    environment:
+      - WHISPER_MODEL=${WHISPER_MODEL:-base}
+      - WHISPER_DEVICE=${WHISPER_DEVICE:-cpu}
+      - WHISPER_COMPUTE_TYPE=${WHISPER_COMPUTE_TYPE:-int8}
+    volumes:
+      - whisper_models:/root/.cache/huggingface
+      - uploads:/uploads
+    ports:
+      - "9000:9000"
+    networks:
+      - iwasist-network
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: iwasist-backend
+    restart: unless-stopped
+    depends_on:
+      - mongodb
+      - temporal
+    env_file:
+      - .env
+    environment:
+      - MONGODB_URL=mongodb://mongodb:27017
+      - TEMPORAL_ADDRESS=temporal:7233
+      - WHISPER_SERVICE_URL=http://whisper:9000
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./backend:/app
+      - uploads:/uploads
+    networks:
+      - iwasist-network
+
+  worker:
+    build:
+      context: ./worker
+      dockerfile: Dockerfile
+    container_name: iwasist-worker
+    restart: unless-stopped
+    depends_on:
+      - temporal
+      - mongodb
+      - whisper
+    env_file:
+      - .env
+    environment:
+      - MONGODB_URL=mongodb://mongodb:27017
+      - TEMPORAL_ADDRESS=temporal:7233
+      - WHISPER_SERVICE_URL=http://whisper:9000
+    volumes:
+      - ./worker:/app
+      - uploads:/uploads
+    networks:
+      - iwasist-network
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: iwasist-frontend
+    restart: unless-stopped
+    depends_on:
+      - backend
+    environment:
+      - VITE_API_BASE_URL=http://localhost:8000
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+    networks:
+      - iwasist-network
+
+networks:
+  iwasist-network:
+    driver: bridge
+
+volumes:
+  mongodb_data:
+  temporal_postgres_data:
+  whisper_models:
+  uploads:
